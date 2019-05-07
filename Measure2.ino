@@ -1,28 +1,34 @@
 #include <TM1638lite.h>
-#include "HCSR04_C.h"
 #include <math.h>
 #include "Aggregator.h"
 #include "ftoa.h"
+#include "NewPing.h"
 
 //Setup Measure Settings
 #define MENU_DELAY 50
 #define BUF_SIZE 140
-#define CALLIBRATE_DISTANCE 100
-#define MASURE_PAUSE 30
+#define MIN_DIST 2.0
+#define MAX_DIST 200.0
+#define MAX_MEASURE 5000000
+#define SPEED_OF_SOUND 343.4
+
+//setup measure
+#define STD_RANGE 1.7
+#define MINMAX_RANGE 0.1
+
+//display connections
+#define PIN_STROBE 4
+#define PIN_CLOCK 7
+#define PIN_DATA 8
+//sensor connections
+#define PIN_TRIGGER 13
+#define PIN_ECHO 12
 double buffer[BUF_SIZE];
-  Aggregator firstMean;
-
-
 //https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance
 
-//setup sensor connections
-uint8_t strobePin = 4, clockPin = 7, dataPin = 8;
-TM1638lite tm(strobePin, clockPin, dataPin);
-
-uint8_t triggerPin = 13, echoPin = 12;
-UltraSonicDistanceSensor distanceSensor(triggerPin, echoPin);
-
 //program global variables - so it is not reallocatd and dealloated
+TM1638lite tm(PIN_STROBE, PIN_CLOCK, PIN_DATA);
+NewPing sonar(PIN_TRIGGER, PIN_ECHO, MAX_DIST);
 char charbuff[9], charbuff2[9];
 
 enum state
@@ -36,7 +42,6 @@ state current = MEASURE;
 
 void setup()
 {
-  // Serial.begin(9600);
   tm.reset();
 }
 
@@ -52,55 +57,49 @@ void loop()
     {
       current = MEASURE;
     }
-   
+
     delayMicroseconds(MENU_DELAY);
     return;
 
   case MEASURE:
+    tm.reset();
     tm.setLED(0, 1);
     measureMode();
     tm.setLED(0, 0);
     return;
   case ERROR:
     tm.setLED(1, 1);
-    //tm.displayText("Error");
   case SHOW:
     if ((buttons & 2) != 0) //button 2
     {
+      tm.setLED(1, 0);
       current = IDLE;
     }
     delay(MENU_DELAY);
-    current = MEASURE;
     return;
   }
 }
 
-bool isInRange(double mean, double std, double data)
+bool isInRange(double mean, double std, double min, double max, double data)
 {
-  return abs(mean - data) < 1.7 * std;
+  double minmax = (max - min) * MINMAX_RANGE;
+  return (abs(mean - data) < STD_RANGE * std) && (data > min + minmax) && (data < max - minmax);
 }
 
 double calculateMean(int N, double *data_buffer, double calculate(void))
 {
-  firstMean.reset();
-  double mean = 0;
-  int j = 0;
+  unsigned long t = micros();
+  Aggregator firstMean;
+
   //Collect Data
   double min = -1, max = -1;
   for (int i = 0; i < N; i++)
   {
 
     data_buffer[i] = (*calculate)();
-
-    delayMicroseconds((MASURE_PAUSE));
-  }
-  for (int i = 0; i < N; i++)
-  {
     //reject faulty sensor data
     if (data_buffer[i] > 0)
     {
-      mean += data_buffer[i];
-      j++;
       firstMean.addData(data_buffer[i]);
 
       if (min == -1 || data_buffer[i] < min)
@@ -112,36 +111,28 @@ double calculateMean(int N, double *data_buffer, double calculate(void))
   }
 
   double std = firstMean.getStd();
-  // if(isInRange(mean, std,firstMean.getMean())
-  // double
-
-  mean /= j;
-  // Serial.println("::::Mean:");
-  // Serial.println(mean, 3);
-  // Serial.println(firstMean.getMean(), 3);
-  // Serial.println(mean - firstMean.getMean(), 11);
-  // Serial.println(std, 11);
-  // Serial.println(j);
-  // mean = firstMean.getMean();
+  double mean = firstMean.getMean();
 
   firstMean.reset();
 
   //Use only good quality Data
   for (int i = 0; i < N; i++)
   {
-    if (isInRange(mean, std, data_buffer[i]) && data_buffer[i] > min + (max - min) / 10 && data_buffer[i] < max - (max - min) / 10)
+    if (isInRange(mean, std, min, max, data_buffer[i]))
     {
       firstMean.addData(data_buffer[i]);
-      // Serial.print(data_buffer[i]);
-      // Serial.print(",");
-      // Serial.println(firstMean.getMean(), 3);
     }
   }
 
-  // Serial.println(firstMean.getStd(), 3);
-  // Serial.println(firstMean.getMean()-mean, 3);
-  //   Serial.println(firstMean.getCount()/(float)j);
-  // Serial.println(":::::Mean:::");
+  //get as much additional data as possible
+  while (micros() - t < MAX_MEASURE)
+  {
+    double d = (*calculate)();
+    if (isInRange(mean, std, min, max, d))
+    {
+      firstMean.addData(d);
+    }
+  }
 
   return firstMean.getMean();
 }
@@ -154,24 +145,25 @@ void displayNumber(double data)
 }
 double getDistanceCm()
 {
-  return distanceSensor.measureDistanceCm();
-}
+  double d = sonar.ping() / 2 * 1.0e-4 * SPEED_OF_SOUND;
 
+  if (d <= MIN_DIST)
+    return -1;
+  else
+    return d;
+}
 void measureMode()
 {
-  //tm.reset();
+
   double distance = calculateMean(BUF_SIZE, buffer, &getDistanceCm);
-  tm.setLED(1, 0);
   //measurement error
-  if (distance <= 2.0)
+  if (distance <= MIN_DIST)
   {
     current = ERROR;
     return;
   }
 
   displayNumber(distance);
-  delayMicroseconds(1500);
-
   current = SHOW;
   return;
 }
