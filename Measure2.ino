@@ -38,7 +38,7 @@ enum state
   SHOW = 3,
   ERROR = 5,
 };
-state current = MEASURE;
+state current = IDLE;
 
 void setup()
 {
